@@ -15,7 +15,7 @@ EMBED_BATCH = 10
 
 RERANK_MODEL = "qwen3-rerank"
 RERANK_TIMEOUT = float(os.getenv("RERANK_TIMEOUT", "2"))
-RERANK_THRESHOLD = float(os.getenv("RERANK_THRESHOLD", "0.4"))
+RERANK_THRESHOLD = float(os.getenv("RERANK_THRESHOLD", "0.5"))
 
 RECALL_K = 30
 TOP_K = 5
