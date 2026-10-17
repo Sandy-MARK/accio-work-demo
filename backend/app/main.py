@@ -1,7 +1,9 @@
+from typing import Literal
+
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 
-from . import bailian, config, crawl, ingest, meta, search, store, tables
+from . import answer, bailian, config, crawl, ingest, meta, search, store, tables
 from .chunk import STRATEGIES
 
 app = FastAPI(title="Accio Work 知识库演示")
@@ -172,3 +174,23 @@ def do_search(req: SearchReq):
     if req.role not in meta.ROLES:
         raise HTTPException(400, "未知身份")
     return _run(search.search, req.query.strip(), req.role, req.platform or None, req.market or None)
+
+
+class ChatTurn(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str
+
+
+class ChatReq(BaseModel):
+    query: str
+    role: str = "zhangsan"
+    history: list[ChatTurn] = []
+
+
+@app.post("/api/chat")
+def do_chat(req: ChatReq):
+    if not req.query.strip():
+        raise HTTPException(400, "请输入问题")
+    if req.role not in meta.ROLES:
+        raise HTTPException(400, "未知身份")
+    return _run(answer.answer, req.query.strip(), req.role, [t.model_dump() for t in req.history])

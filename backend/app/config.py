@@ -27,6 +27,10 @@ QA_GAP = 0.03
 QA_SUGGEST = 0.70
 QA_TOP_K = 3
 
+CHAT_MODEL = os.getenv("CHAT_MODEL", "qwen-plus")
+CHAT_TIMEOUT = float(os.getenv("CHAT_TIMEOUT", "60"))
+CHAT_HISTORY = 4
+
 CRAWL_MAX_PAGES = 30
 
 DATA_DIR = ROOT / "data"

@@ -1,4 +1,4 @@
-"""阿里云百炼：text-embedding-v4 向量化与 qwen3-rerank 重排。"""
+"""阿里云百炼：text-embedding-v4 向量化、qwen3-rerank 重排、通义千问作答。"""
 import httpx
 
 from . import config
@@ -54,3 +54,13 @@ def rerank(query: str, documents: list[str]) -> list[tuple[int, float]]:
     )
     results = _check(r, "重排")["output"]["results"]
     return [(x["index"], x["relevance_score"]) for x in results]
+
+
+def chat(messages: list[dict]) -> str:
+    r = httpx.post(
+        f"{config.BASE_URL}/compatible-mode/v1/chat/completions",
+        headers=_headers(),
+        json={"model": config.CHAT_MODEL, "messages": messages, "temperature": 0.2},
+        timeout=config.CHAT_TIMEOUT,
+    )
+    return _check(r, "作答")["choices"][0]["message"]["content"].strip()
