@@ -229,7 +229,9 @@ export default function DocList({ meta, onOpen }) {
               {shown.map((d) => (
                 <tr key={d.doc_version_id}>
                   <td>
-                    <a onClick={() => onOpen(d.doc_version_id)}>{d.name}</a>
+                    <button className="link" onClick={() => onOpen(d.doc_version_id)}>
+                      {d.name}
+                    </button>
                     <div className="sub">
                       v{d.version} · {fmtSize(d.size)} · {d.created_at.replace('T', ' ')}
                     </div>
