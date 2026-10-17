@@ -128,6 +128,28 @@ def _html(data: bytes) -> str:
     return "\n".join(ln for ln in lines if ln)
 
 
+def read_rows(filename: str, data: bytes) -> list[tuple[str, list[list[str]]]]:
+    """表格文件的原始行，供结构化抽取使用：[(sheet 名, 行列表)]。"""
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    if ext == "csv":
+        return [("CSV", [[c.strip() for c in r] for r in csv.reader(io.StringIO(_decode(data))) if any(r)])]
+    if ext == "xlsx":
+        from openpyxl import load_workbook
+
+        wb = load_workbook(io.BytesIO(data), data_only=True)
+        out = []
+        for ws in wb.worksheets:
+            rows = [
+                ["" if v is None else str(v).strip() for v in row]
+                for row in ws.iter_rows(max_row=5000, max_col=50, values_only=True)
+            ]
+            rows = [r for r in rows if any(r)]
+            if rows:
+                out.append((ws.title, rows))
+        return out
+    raise ParseError("数据表格只支持 xlsx 或 csv 文件")
+
+
 def parse(filename: str, data: bytes) -> str:
     ext = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
     if ext not in SUPPORTED:

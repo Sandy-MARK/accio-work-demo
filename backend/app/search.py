@@ -1,16 +1,12 @@
-"""在线检索：权限与适用条件过滤 → 关键词 + 向量召回 → RRF 融合 30 条 → qwen3-rerank → 阈值 → Top-5 → 父块回填。"""
+"""在线检索：身份与适用条件过滤 → 标准问答匹配 → 结构化精确查询 →
+关键词 + 向量召回 → RRF 融合 30 条 → qwen3-rerank → 阈值 → Top-5 → 父块回填。"""
 import math
 import re
 import time
 from collections import Counter
 from datetime import date
 
-from . import bailian, config, store
-
-ROLES = {
-    "merchant": {"label": "商家自建 Agent（公开 + 本人私有）", "access": {"public", "private"}},
-    "official": {"label": "Accio Work 官方 Agent（公开 + 内部 + 本人私有）", "access": {"public", "internal", "private"}},
-}
+from . import bailian, config, meta, qa, store, tables
 
 _CJK_RUN = re.compile(r"[\u3400-\u9fff]+")
 _WORD = re.compile(r"[A-Za-z0-9]+")
@@ -33,40 +29,88 @@ def validity(doc: dict, today: str) -> str:
     return "active"
 
 
-def _candidates(role: str, platform: str | None, market: str | None) -> tuple[list[dict], dict]:
+def _reason(d: dict, role: dict, platform: str | None, market: str | None, today: str) -> str | None:
+    if d["review_status"] != "approved":
+        return f"审核状态为「{meta.label('review_status', d['review_status'])}」，审核通过前不参与检索"
+    if d["access_level"] not in role["access"]:
+        return f"权限「{meta.label('access_level', d['access_level'])}」不在当前身份可见范围"
+    if d["access_level"] == "department" and role["dept"] not in d["dept_ids"].split(","):
+        depts = "、".join(meta.label("dept_ids", x) for x in d["dept_ids"].split(","))
+        return f"仅{depts}可见"
+    if role["exclude_pii"] and d["pii_level"] == "high":
+        return "含个人信息，面向买家的身份不可见"
+    if (v := validity(d, today)) != "active":
+        return f"效力状态 {v}"
+    if platform and d["platform"] not in (platform, "general"):
+        return f"平台 {d['platform']} 与筛选 {platform} 不符"
+    if market and market not in d["market"].split(",") and d["market"] != "unknown":
+        return f"市场 {d['market']} 不含 {market}"
+    return None
+
+
+def _visible(role_key: str, platform: str | None, market: str | None) -> tuple[dict, dict]:
     today = date.today().isoformat()
-    allowed = ROLES[role]["access"]
+    role = meta.ROLES[role_key]
     with store.conn() as c:
         docs = [store.row(r) for r in c.execute("SELECT * FROM docs WHERE status = 'indexed'")]
-        stats = {"total_docs": len(docs), "filtered_out": []}
-        keep = {}
-        for d in docs:
-            reason = None
-            if d["access_level"] not in allowed:
-                reason = f"权限级别 {d['access_level']} 不在当前身份可见范围"
-            elif (v := validity(d, today)) != "active":
-                reason = f"效力状态 {v}"
-            elif platform and d["platform"] not in (platform, "general"):
-                reason = f"平台 {d['platform']} 与筛选 {platform} 不符"
-            elif market and market not in d["market"].split(",") and d["market"] != "unknown":
-                reason = f"市场 {d['market']} 不含 {market}"
-            if reason:
-                stats["filtered_out"].append({"name": d["name"], "version": d["version"], "reason": reason})
-            else:
-                keep[d["doc_version_id"]] = d
-        if not keep:
-            return [], stats
-        marks = ",".join("?" * len(keep))
-        rows = c.execute(
-            f"SELECT * FROM chunks WHERE doc_version_id IN ({marks}) AND kind != 'parent' AND embedding IS NOT NULL",
-            list(keep),
-        )
-        chunks = []
-        for r in rows:
-            ch = store.row(r)
-            ch["doc"] = keep[ch["doc_version_id"]]
-            chunks.append(ch)
-    return chunks, stats
+    stats = {"total_docs": len(docs), "filtered_out": []}
+    keep = {}
+    for d in docs:
+        d.pop("parsed_md", None)
+        if reason := _reason(d, role, platform, market, today):
+            stats["filtered_out"].append({"name": d["name"], "version": d["version"], "reason": reason})
+        else:
+            keep[d["doc_version_id"]] = d
+    return keep, stats
+
+
+def _load(table: str, keep: dict, extra: str = "") -> list[dict]:
+    if not keep:
+        return []
+    marks = ",".join("?" * len(keep))
+    with store.conn() as c:
+        rows = c.execute(f"SELECT * FROM {table} WHERE doc_version_id IN ({marks}) {extra}", list(keep)).fetchall()
+    out = []
+    for r in rows:
+        x = store.row(r)
+        x["doc"] = keep[x["doc_version_id"]]
+        out.append(x)
+    return out
+
+
+def _structured(query: str, keep: dict) -> dict | None:
+    tdocs = {k: d for k, d in keep.items() if d["knowledge_type"] == "data_table"}
+    if not tdocs:
+        return None
+    skus = {s.upper() for s in tables.SKU_TOKEN.findall(query)}
+    countries = [
+        (code, name) for code, name in meta.OPTIONS["market"]
+        if code != "unknown" and (name in query or re.search(rf"(?<![A-Za-z]){code}(?![A-Za-z])", query))
+    ]
+    out = {"skus": sorted(skus), "countries": [n for _, n in countries], "hits": [], "excluded": []}
+    if not skus and not countries:
+        return out
+    for r in _load("table_rows", tdocs):
+        kind = r["doc"]["table_kind"]
+        f = r["data"]["fields"]
+        hit = f.get("sku_id", "").upper() in skus
+        if kind == "freight" and countries:
+            dest = f.get("destination", "").lower()
+            hit = hit or any(code.lower() == dest or name in f.get("destination", "") for code, name in countries)
+        if not hit:
+            continue
+        status = tables.row_status(kind, f) if kind in ("price", "freight") else "active"
+        item = {
+            "doc_name": r["doc"]["name"],
+            "version": r["doc"]["version"],
+            "table_kind": kind,
+            "locator": f"{r['sheet']}；第 {r['row_no']} 行",
+            "fields": [[tables.field_label(kind, k), v] for k, v in f.items()] + list(r["data"]["extra"].items()),
+            "row_status": status,
+        }
+        (out["hits"] if status == "active" else out["excluded"]).append(item)
+    out["hits"] = out["hits"][:20]
+    return out
 
 
 def _bm25(query: str, chunks: list[dict], k1=1.5, b=0.75) -> list[tuple[int, float]]:
@@ -108,21 +152,43 @@ def _brief(ch: dict, **extra) -> dict:
     }
 
 
-def search(query: str, role: str = "merchant", platform: str | None = None, market: str | None = None) -> dict:
+def search(query: str, role: str = "zhangsan", platform: str | None = None, market: str | None = None) -> dict:
     t0 = time.perf_counter()
     timing = {}
-    chunks, stats = _candidates(role, platform, market)
+    keep, stats = _visible(role, platform, market)
+    chunks = _load("chunks", keep, "AND kind != 'parent' AND embedding IS NOT NULL")
+    units = _load("qa_units", keep, "AND embeddings IS NOT NULL")
     timing["过滤"] = round((time.perf_counter() - t0) * 1000)
-    result = {"query": query, "role": ROLES[role]["label"], "filter": stats, "candidates": len(chunks)}
+    result = {
+        "query": query,
+        "role": meta.ROLES[role]["label"],
+        "filter": stats,
+        "candidates": len(chunks),
+        "threshold": config.RERANK_THRESHOLD,
+        "timing": timing,
+    }
+
+    t = time.perf_counter()
+    result["structured"] = _structured(query, keep)
+    timing["结构化查询"] = round((time.perf_counter() - t) * 1000)
+
+    if not chunks and not units:
+        return result | {"qa": None, "status": "empty", "message": "当前身份与筛选条件下没有可检索的文档"}
+
+    t = time.perf_counter()
+    qv = bailian.embed([query])[0]
+    timing["问题向量化"] = round((time.perf_counter() - t) * 1000)
+
+    result["qa"] = qa.match(qv, units) if units else None
+
     if not chunks:
-        return {**result, "status": "empty", "message": "当前身份与筛选条件下没有可检索的文档", "timing": timing}
+        return result | {"status": "empty", "message": "没有可检索的文档块"}
 
     t = time.perf_counter()
     kw = _bm25(query, chunks)[: config.RECALL_K]
     timing["关键词召回"] = round((time.perf_counter() - t) * 1000)
 
     t = time.perf_counter()
-    qv = bailian.embed([query])[0]
     vec = sorted(((i, _cos(qv, c["embedding"])) for i, c in enumerate(chunks)), key=lambda x: -x[1])[: config.RECALL_K]
     timing["向量召回"] = round((time.perf_counter() - t) * 1000)
 
@@ -166,11 +232,7 @@ def search(query: str, role: str = "merchant", platform: str | None = None, mark
                 parents[r["chunk_id"]] = {"text": r["text"], "tokens": r["tokens"]}
 
     result["final"] = [
-        _brief(
-            chunks[i],
-            score=None if s is None else round(s, 3),
-            parent=parents.get(chunks[i]["parent_chunk_id"]),
-        )
+        _brief(chunks[i], score=None if s is None else round(s, 3), parent=parents.get(chunks[i]["parent_chunk_id"]))
         for i, s in final
     ]
     if not final:
@@ -181,6 +243,4 @@ def search(query: str, role: str = "merchant", platform: str | None = None, mark
         result["message"] = "重排不可用，返回混合检索融合排序的前 5 条，标记为「未经重排」"
     else:
         result["status"] = "ok"
-    result["timing"] = timing
-    result["threshold"] = config.RERANK_THRESHOLD
     return result

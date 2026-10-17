@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { api } from '../api.js'
-import { KIND, Tag } from '../labels.js'
+import { KIND, Tag, opt } from '../labels.js'
 
 const STATUS_TEXT = {
   ok: { text: '命中', cls: 'green' },
@@ -54,8 +54,105 @@ function Stage({ title, desc, hits, threshold, open }) {
   )
 }
 
+const QA_DECISION = {
+  direct: { text: '标准答案直答', cls: 'green' },
+  choose: { text: '请用户选择', cls: 'blue' },
+  suggest: { text: '你是不是想问 + RAG', cls: 'orange' },
+  rag: { text: '交给 RAG', cls: 'gray' },
+}
+
+function QaCard({ qa, r }) {
+  const d = QA_DECISION[qa.decision]
+  const best = qa.hit ?? qa.options?.[0]
+  return (
+    <section className="card">
+      <div className="card-head">
+        <h2>
+          第一层：标准问答库 <Tag cls={d.cls}>{d.text}</Tag>
+        </h2>
+        <span className="sub">
+          直答线 {r.qa_direct} · 并列差值 {r.qa_gap} · 候选线 {r.qa_suggest} · 共 {qa.unit_count} 条问答
+        </span>
+      </div>
+      <div className="alert gray">{qa.message}</div>
+      {qa.decision === 'direct' && best && (
+        <div className="qa-answer">
+          <div className="qa-q">
+            <b>{best.standard_question}</b>
+            <span className="sub">
+              {' '}
+              命中问法「{best.matched_question}」· {best.doc_name} v{best.version} · {best.locator}
+            </span>
+          </div>
+          <pre className="qa-a">{best.answer}</pre>
+        </div>
+      )}
+      {(qa.decision === 'choose' || qa.decision === 'suggest') && (
+        <div className="qa-options">
+          {qa.options.map((o) => (
+            <span key={o.qa_id} className="chip">
+              {o.standard_question} <em>{o.score}</em>
+            </span>
+          ))}
+        </div>
+      )}
+      <details>
+        <summary>相似度前 {qa.candidates.length} 条</summary>
+        <ul className="log">
+          {qa.candidates.map((c) => (
+            <li key={c.qa_id}>
+              <b>{c.score}</b> {c.standard_question}（命中问法：{c.matched_question}）
+            </li>
+          ))}
+        </ul>
+      </details>
+    </section>
+  )
+}
+
+function StructuredCard({ s, meta }) {
+  if (!s.skus.length && !s.countries.length) return null
+  return (
+    <section className="card">
+      <div className="card-head">
+        <h2>结构化精确查询</h2>
+        <span className="sub">
+          识别到 {[...s.skus.map((x) => `SKU ${x}`), ...s.countries].join('、')}
+        </span>
+      </div>
+      {s.hits.length ? (
+        <ol className="hits">
+          {s.hits.map((h, i) => (
+            <li key={i}>
+              <span className="rank">{i + 1}</span>
+              <div>
+                <div className="hit-head">
+                  <b>{h.doc_name}</b> <small>v{h.version}</small>
+                  <Tag cls="purple">{opt(meta, 'table_kind', h.table_kind)}</Tag>
+                  <span className="loc">{h.locator}</span>
+                </div>
+                <div className="kv">
+                  {h.fields.map(([k, v]) => (
+                    <span key={k}>
+                      <em>{k}</em>
+                      {v}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            </li>
+          ))}
+        </ol>
+      ) : (
+        <div className="empty">表格中没有匹配的行</div>
+      )}
+      {s.excluded.length > 0 && <div className="alert gray">已排除 {s.excluded.length} 行过期或未生效的价格 / 运价</div>}
+    </section>
+  )
+}
+
 export default function SearchTest({ meta }) {
-  const [q, setQ] = useState({ query: '', role: 'merchant', platform: '', market: '' })
+  const [q, setQ] = useState({ query: '', role: 'zhangsan', platform: '', market: '' })
   const [res, setRes] = useState(null)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
@@ -83,12 +180,12 @@ export default function SearchTest({ meta }) {
       <header className="page-head">
         <h1>检索测试</h1>
         <p>
-          按身份与适用条件过滤 → 关键词与向量各召回 {r.recall_k} 条 → RRF 融合取 {r.recall_k} 条 → {meta.models.rerank} 重排 → 保留相关分 ≥{' '}
+          按身份、部门、审核与适用条件过滤 → 标准问答匹配 → 表格精确查询 → 关键词与向量各召回 {r.recall_k} 条 → RRF 融合取 {r.recall_k} 条 → {meta.models.rerank} 重排 → 保留相关分 ≥{' '}
           {r.threshold} → 最多 {r.top_k} 条 → 子块命中时回填父块
         </p>
       </header>
       <form className="card search-form" onSubmit={run}>
-        <input className="query" placeholder="输入问题，例如：儿童玩具上架需要什么资质？" value={q.query} onChange={set('query')} />
+        <input className="query" placeholder="例如：儿童玩具上架需要什么资质？ / 积分怎么计算 / TB-1001 发美国的价格和运费" value={q.query} onChange={set('query')} />
         <select value={q.role} onChange={set('role')}>
           {Object.entries(meta.roles).map(([k, v]) => (
             <option key={k} value={k}>
@@ -148,8 +245,13 @@ export default function SearchTest({ meta }) {
               </details>
             )}
           </section>
+          {res.qa && <QaCard qa={res.qa} r={r} />}
+          {res.structured && <StructuredCard s={res.structured} meta={meta} />}
           <section className="card">
-            <h2>最终结果（交给大模型作答的依据）</h2>
+            <h2>
+              {res.qa ? '第二层：RAG 检索结果' : 'RAG 检索结果'}（交给大模型作答的依据）
+              {res.qa?.decision === 'direct' && <small className="sub"> · 已由标准答案作答，此处仅作对照</small>}
+            </h2>
             {res.final?.length ? (
               <ol className="hits">
                 {res.final.map((h, i) => (

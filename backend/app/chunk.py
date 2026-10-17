@@ -31,9 +31,15 @@ STRATEGIES = {
         "size": "每块 ≤20 行，每块重复表头",
         "parent_child": "否",
     },
+    "data_table": {
+        "label": "数据表格",
+        "strategy": "结构化抽取（商品目录 / 价格 / 运价 / 成本）：表头映射为标准字段，逐行写入业务表",
+        "size": "不切块；商品目录每个 SKU 另生成 1 条描述块，其余不向量化",
+        "parent_child": "否",
+    },
     "qa": {
         "label": "标准问答",
-        "strategy": "按内容类型：一条问答为一块",
+        "strategy": "按内容类型：一条问答为一块，同时抽取标准问、相似问、答案写入 QA 库",
         "size": "整条不切，不重叠",
         "parent_child": "否",
     },
@@ -287,4 +293,6 @@ def chunk(md: str, knowledge_type: str) -> list[Chunk]:
         return _table(secs)
     if knowledge_type == "qa":
         return _qa(secs)
+    if knowledge_type == "data_table":
+        return []
     return _case(secs)

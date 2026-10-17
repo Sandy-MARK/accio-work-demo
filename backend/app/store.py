@@ -1,4 +1,4 @@
-"""SQLite 存储：文档版本与块。字段名对应 PRD 6.2 元数据字典。"""
+"""SQLite 存储：文档版本、块、结构化表行、QA 单元、抓取来源。字段名对应 PRD 6.2 元数据字典。"""
 import json
 import sqlite3
 from contextlib import contextmanager
@@ -21,8 +21,6 @@ CREATE TABLE IF NOT EXISTS docs (
     business_domain TEXT NOT NULL,
     access_level TEXT NOT NULL,
     quality_grade TEXT NOT NULL,
-    risk_level TEXT NOT NULL,
-    processing_policy TEXT NOT NULL,
     effective_from TEXT,
     expires_at TEXT,
     superseded INTEGER NOT NULL DEFAULT 0,
@@ -46,7 +44,44 @@ CREATE TABLE IF NOT EXISTS chunks (
     embedding TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_chunks_doc ON chunks(doc_version_id);
+CREATE TABLE IF NOT EXISTS table_rows (
+    doc_version_id TEXT NOT NULL,
+    sheet TEXT NOT NULL,
+    row_no INTEGER NOT NULL,
+    data TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_rows_doc ON table_rows(doc_version_id);
+CREATE TABLE IF NOT EXISTS qa_units (
+    qa_id TEXT PRIMARY KEY,
+    doc_version_id TEXT NOT NULL,
+    standard_question TEXT NOT NULL,
+    similar_questions TEXT NOT NULL,
+    answer TEXT NOT NULL,
+    locator TEXT NOT NULL,
+    embeddings TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_qa_doc ON qa_units(doc_version_id);
+CREATE TABLE IF NOT EXISTS crawl_sources (
+    source_id TEXT PRIMARY KEY,
+    url TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    meta TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    last_run_at TEXT,
+    last_result TEXT
+);
 """
+
+DOC_COLUMNS = [
+    ("risk_level", "normal"),
+    ("processing_policy", "approved_cloud"),
+    ("review_status", "approved"),
+    ("dept_ids", ""),
+    ("pii_level", "none"),
+    ("content_hash", ""),
+    ("source_url", ""),
+    ("table_kind", ""),
+]
 
 
 def init() -> None:
@@ -55,7 +90,7 @@ def init() -> None:
     with conn() as c:
         c.executescript(SCHEMA)
         cols = {r[1] for r in c.execute("PRAGMA table_info(docs)")}
-        for col, default in [("risk_level", "normal"), ("processing_policy", "approved_cloud")]:
+        for col, default in DOC_COLUMNS:
             if col not in cols:
                 c.execute(f"ALTER TABLE docs ADD COLUMN {col} TEXT NOT NULL DEFAULT '{default}'")
 
@@ -75,8 +110,10 @@ def row(r: sqlite3.Row | None) -> dict | None:
     if r is None:
         return None
     d = dict(r)
-    if "steps" in d:
-        d["steps"] = json.loads(d["steps"])
-    if "embedding" in d:
-        d["embedding"] = json.loads(d["embedding"]) if d["embedding"] else None
+    for k in ("steps", "similar_questions", "data", "meta", "last_result"):
+        if k in d and isinstance(d[k], str):
+            d[k] = json.loads(d[k])
+    for k in ("embedding", "embeddings"):
+        if k in d:
+            d[k] = json.loads(d[k]) if d[k] else None
     return d

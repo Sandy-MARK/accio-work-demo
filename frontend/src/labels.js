@@ -13,9 +13,32 @@ export const VALIDITY = {
   superseded: { text: '已被替代', cls: 'gray' },
 }
 
+export const REVIEW = {
+  unreviewed: { text: '待审核', cls: 'orange' },
+  approved: { text: '已审核', cls: 'green' },
+  rejected: { text: '已驳回', cls: 'red' },
+}
+
+export const ROW_STATUS = {
+  active: { text: '有效', cls: 'green' },
+  expired: { text: '已过期', cls: 'gray' },
+  pending: { text: '未生效', cls: 'gray' },
+}
+
 export const KIND = { parent: '父块', child: '子块', normal: '普通块' }
 
-export const STEPS = ['解析', '切块', '向量化', '建索引']
+export function expectedSteps(knowledgeType, tableKind) {
+  const isTable = knowledgeType === 'data_table'
+  return [
+    '解析',
+    ...(isTable ? ['结构化抽取'] : []),
+    '切块',
+    ...(knowledgeType === 'qa' ? ['问答抽取'] : []),
+    '敏感信息检查',
+    ...(isTable && tableKind !== 'catalog' ? [] : ['向量化']),
+    '建索引',
+  ]
+}
 
 export function opt(meta, field, value) {
   if (!value) return '—'
